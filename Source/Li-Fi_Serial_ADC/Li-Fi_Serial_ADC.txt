@@ -1,0 +1,218 @@
+/* ====================================================================================================================
+ * Li-Fi_Serial_ADC.ino
+ * 
+ * Description: This is the source code intended to be uploaded to the microcontroller sending the ADC reading of the 
+ *              LDR voltage divider. In consequence of choosing the other transceiver module as the main controller, 
+ *              this transceiver module was arbitrarily decided to have no manual control of its’ transmission. 
+ *              Rather, it only responds with a message when it receives one. This code was written to demonstrate the 
+ *              capability of bidirectional communication for the Li-FI transceivers using the Arduino in a simple manner 
+ *              requiring no additional control inputs.
+ *              
+ * Pins: The relevant pins can be changed in the preprocessor section below. Pins D2 and D3 are used for 
+ *       software serial rx and tx, respectively. Pin A1 is used for an analog reading of the LDR voltage divider.
+ * ==================================================================================================================== */
+// Library includes
+#include <SoftwareSerial.h>    // For software emulated serial on GPIO
+#include <Wire.h>              // For I2C on GPIO
+#include <Adafruit_SSD1306.h>  // I2C OLED display driver library
+
+// Software serial UART pins
+#define rxPin                2 // Software Serial rx
+#define txPin                3 // Software Serial tx
+
+// ADC analog input pin
+#define ambientLightPin     A1 // LDR voltage divider reading
+
+// Declaration for an SSD1306 OLED display. The pins for I2C are defined by the Wire-library. 
+#define OLED_RESET          -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS    0x3C // See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+#define SCREEN_WIDTH       128 // OLED display width, in pixels
+#define SCREEN_HEIGHT       64 // OLED display height, in pixels
+
+// Variable declarations
+String RCVDdataString = "";    // Predeclaration for received data substring
+String buff = "";              // Preddeclaration for received message in its entirety (up until '\0')
+int delimPos, endPos;          // Predeclarations for delimiter positions of received data string ('*' and '\0')
+String RCVDchecksumString;     // Predeclaration for received checksum string and its' integer equivalent
+uint16_t RCVDchecksum;         
+uint16_t ambientLight;         // Predeclarations for the ambient light reading and its' checksum
+uint16_t ambientLightChecksum; 
+unsigned int msgCount = 0;     // msgCount represents TxCount and RxCount identically by program design
+unsigned int error = 0;        // error represents a count of transmission errors by checksum mismatch   
+
+// Object instantiations 
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+SoftwareSerial mySerial = SoftwareSerial(rxPin, txPin);
+
+// Function Prototypes
+uint16_t checksumCalculator(uint8_t* data, uint16_t len);
+void displayInit();
+void writeOLEDframe();
+void toBytes(unsigned char bytesArr[], unsigned int data);
+
+/* ====================================================================================================================
+ * setup()
+ * 
+ * Description: Setup code for run-time infinite loop. Initialize all GPIO, the OLED display, and both HW (debugging) and 
+ *              SW (Li-Fi) serial ports.
+ * ==================================================================================================================== */
+void setup() {
+  //Init hardware serial for debugging means
+  Serial.begin(115200);
+  
+  //Init display for displaying
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;); // Don't proceed, loop forever
+  }
+
+  // Init display for this application
+  displayInit();
+  
+  // Define pin modes for TX and RX
+  pinMode(rxPin, INPUT);
+  pinMode(txPin, OUTPUT);
+  pinMode(ambientLightPin, INPUT);
+  
+  // Set the baud rate for the SoftwareSerial object
+  mySerial.begin(57600);
+
+  // Wait a short duration before executing main to finish inits
+  delay(10);
+}
+
+/* ====================================================================================================================
+ * loop()
+ * 
+ * Description: Main block for all function calls and control logic.
+ * ==================================================================================================================== */
+void loop() {
+  // When there is no data waiting in the serial buffer, hold
+  while (!mySerial.available()) {} 
+  
+  // When there is data waiting in the serial buffer, execute this block
+  // Accept waiting data, run CRC check, and print RCVD data to display
+  while (mySerial.available()) {
+    // Process the data received in the serial buffer
+    buff = mySerial.readStringUntil('\0');        // Grab entire message
+    delimPos = buff.indexOf('*');                 // Grab index of asterisk in the string
+    endPos = buff.indexOf('\0');                  // Grab index of the NULL char in the string
+    RCVDdataString = buff.substring(0, delimPos); // Split the received message into its data and checksum substrings
+    RCVDchecksumString = buff.substring(delimPos + 1, endPos);
+    RCVDchecksum = RCVDchecksumString.toInt();    // Cast the checksum substring to an integer
+    
+    // Convert RCVD RCVDdataString to byte array...
+    unsigned char bytesRCVD[4];
+    toBytes(bytesRCVD, RCVDdataString.toInt());
+    
+    // Increment count if the two checksums are not an exact match
+    if (RCVDchecksum != checksumCalculator(bytesRCVD, sizeof(bytesRCVD))) error += 1;
+    
+    msgCount++; // Increment the RCVD count indicating a msg was received
+    
+    // Map an ADC reading to a percentage for transmission
+    ambientLight = map(analogRead(ambientLightPin),0, 1023, 1, 100); 
+
+    // Respond to sender with message
+    unsigned char bytesXMTR[4];  // Convert RCVD RCVDdataString to byte array...
+    toBytes(bytesXMTR, ambientLight);
+    ambientLightChecksum = checksumCalculator(bytesXMTR, sizeof(bytesXMTR));
+
+    // Write via the software serial Tx pin
+    mySerial.print(ambientLight);         // Write data
+    mySerial.print('*');                  // Write data/checksum separation delimiter
+    mySerial.print(ambientLightChecksum); // Write checksum
+    mySerial.print('\0');                 // Write messageend char 
+  } 
+  // Update the OLED in the case a message was received
+  if (RCVDdataString != "") {
+    // Refresh the display only as often as necessary
+    writeOLEDframe(RCVDdataString, ambientLight);
+  } 
+  // Reset for proper control of execution for subsequent loops
+  RCVDdataString = "";
+}
+
+/* ====================================================================================================================
+ * displayInit()
+ * 
+ * Description: Initializes display with static text for demonstration. Values are written to the locations just after
+ *              the static labels during operation to show the status of the system.
+ * ==================================================================================================================== */
+void displayInit() {
+  display.clearDisplay();
+  display.setTextSize(2);       // Prepare font for header text
+  display.setTextColor(WHITE);
+  display.setCursor(0, 10);
+  display.println("__TVCR.0__");  
+  display.setTextSize(1);       // Prepare font for other text    
+  display.setCursor(0, 32);
+  display.println("Rx: ");      // Print location for dispalying received value
+  display.setCursor(0, 48);
+  display.println("Tx: ");      // Print location for displaying transmitted value
+  display.setCursor(80, 32);
+  display.println("CRC?: ");    // Print location for displaying CRC count
+  display.setCursor(80, 48);
+  display.println("#: ");       // Print location for displaying number of transmitted messages
+  display.display();
+  display.setCursor(0, 32);
+}
+
+/* ====================================================================================================================
+ * writeOLEDframe()
+ * 
+ * Description: Updates the OLED with live information pertaining to the system.
+ * ==================================================================================================================== */
+void writeOLEDframe(String &RCVD, uint16_t &XMTR) {
+   display.setCursor(20, 32);
+   display.print("          ");  // Ensure next RCVD has a clear background
+   display.setCursor(20, 32);
+   display.print(RCVD);          // Print newly received data string
+   display.print("cm");
+   display.setCursor(20, 48);
+   display.print("          ");  // Ensure next XMTR has a clear background
+   display.setCursor(20, 48);
+   display.print(XMTR);          // Print transmitted value
+   display.print('%');
+   display.setCursor(110, 32);
+   display.print(error);         // Print the count of CRC errors
+   display.setCursor(93, 48);
+   display.print(msgCount + 1);  // Print the number of messages transmitted
+   display.setCursor(20, 32);
+   display.setTextColor(WHITE, BLACK);
+   display.display();
+}
+
+/* ====================================================================================================================
+ * checksumCalculator() - https://www.tutorialspoint.com/cyclic-redundancy-check-crc-in-arduino
+ * 
+ * Description: Calculates a checksum for a four index array of bytes.
+ * ==================================================================================================================== */
+uint16_t checksumCalculator(uint8_t* data, uint16_t len) {
+   uint16_t curr_crc = 0xAAAA;
+   // Initialize sum1 as the lower byte and sum2 as the higher byte of the initial value
+   uint8_t sum1 = (uint8_t)curr_crc, sum2 = (uint8_t)(curr_crc >> 8);
+   int index;
+   for(index = 0; index < len; index = index+1) {
+      sum1 = (sum1 + data[index]) % 255; // Add successive data bytes to sum1 keeping sum1 < max representable int
+      sum2 = (sum2 + sum1) % 255; // Add sum1 values to sum2 keeping sum2 < max representable int
+   }
+   return (sum2 << 8) | sum1; // Return a 16-bit number, with sum2 as the higher byte and sum1 as the lower byte
+}
+
+/* ====================================================================================================================
+ * toBytes()
+ * 
+ * Description: Converts an integer input into an array of 4 chars (bytes). Used for computing checksums.
+ * ==================================================================================================================== */
+void toBytes(unsigned char bytesArr[], unsigned int data) {
+   bytesArr[0] = (data >> 24) & 0xFF;  // Grab the highest order digit, store in array slot 0 
+   bytesArr[1] = (data >> 16) & 0xFF;  // Grab the second highest order digit, store in array slot 1 
+   bytesArr[2] = (data >> 8) & 0xFF;   // Grab the third highest order digit, store in array slot 2 
+   bytesArr[3] = data & 0xFF;          // Grab the fourth highest order digit, store in array slot 3
+}
+
+/*
+ * ====================================================================================================================
+ * ///////////////////////////////////////////////////// END FILE /////////////////////////////////////////////////////
+ * ==================================================================================================================== */

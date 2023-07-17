@@ -1,0 +1,10 @@
+**Very helpful op amp references:
+
+General single supply topologies - https://www.basic4mcu.com/bbs/board.php?bo_table=k9&wr_id=24&page=2
+(Transimpedance PD amp) - https://www.jensign.com/tznoiseAD/index.html
+
+**AD PD design wizard:
+
+(use 0V reverse bias voltage, SFH213, 90uA peak, choose ADA4807, ~10MHz bandwidth goal)
+https://tools.analog.com/en/photodiode/
+
